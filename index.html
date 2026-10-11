@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <title>Brick Ego-Perspektive Viewer</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #111; font-family: sans-serif; user-select: none; }
+        #info {
+            position: absolute; top: 10px; left: 10px; color: white;
+            background: rgba(0,0,0,0.85); padding: 15px; border-radius: 8px;
+            max-width: 360px; font-size: 13px; line-height: 1.4;
+        }
+        #info hr { border:0; border-top:1px solid #55f; margin: 8px 0; }
+        #info input[type="range"], #info select { width: 100%; margin-top: 2px; cursor: pointer; }
+        .slider-group { margin-bottom: 8px; }
+        
+        .file-btn {
+            background: #28a745; color: white; border: none; padding: 10px 15px;
+            border-radius: 5px; cursor: pointer; font-weight: bold; width: 100%;
+            text-align: center; display: block; margin-top: 5px; box-sizing: border-box;
+        }
+        .file-btn:hover { background: #218838; }
+        #fileInput { display: none; }
+        
+        #crosshair {
+            position: absolute; top: 50%; left: 50%; width: 10px; height: 10px;
+            transform: translate(-50%, -50%); pointer-events: none; display: none;
+        }
+        #crosshair::before, #crosshair::after {
+            content: ''; position: absolute; background: rgba(255,255,255,0.8);
+        }
+        #crosshair::before { top: 4px; left: 0; width: 10px; height: 2px; }
+        #crosshair::after { top: 0; left: 4px; width: 2px; height: 10px; }
+    </style>
+</head>
+<body>
+    <div id="info">
+        <h3>Brick 3D Viewer & Editor</h3>
+        <p id="status"><b>Wähle deine .obj und .mtl Datei aus:</b></p>
+        
+        <label for="fileInput" class="file-btn">📁 Dateien öffnen (.obj & .mtl)</label>
+        <input type="file" id="fileInput" multiple accept=".obj,.mtl">
+
+        <hr>
+        <div class="slider-group">
+            <label>Baustein-Farbe:</label>
+            <select id="brickColor">
+                <option value="0xffffff">Weiß</option>
+                <option value="0xff3300" selected>Rot-Orange</option>
+                <option value="0x0066ff">Blau</option>
+                <option value="0x00cc44">Grün</option>
+                <option value="0xffcc00">Gelb</option>
+                <option value="0xff8000">Orange</option>
+                <option value="0x808080">Grau</option>
+                <option value="0x111111">Schwarz</option>
+            </select>
+        </div>
+        <div class="slider-group">
+            <label>Skalierung: <span id="scaleValue">1.0</span>x</label>
+            <input type="range" id="scaleRange" min="0.01" max="5.0" step="0.01" value="1.0">
+        </div>
+        <div class="slider-group">
+            <label>Position X: <span id="posXValue">0</span></label>
+            <input type="range" id="posXRanger" min="-200" max="200" step="1" value="0">
+        </div>
+        <div class="slider-group">
+            <label>Position Y: <span id="posYValue">0</span></label>
+            <input type="range" id="posYRanger" min="-100" max="200" step="1" value="0">
+        </div>
+        <div class="slider-group">
+            <label>Position Z: <span id="posZValue">0</span></label>
+            <input type="range" id="posZRanger" min="-200" max="200" step="1" value="0">
+        </div>
+        <hr>
+        <p style="font-size: 11px; margin: 0;">
+            <b>W, A, S, D</b> = Bewegen | <b>Maus</b> = Umschauen<br>
+            <b>C</b> = Flugmodus an/aus (<span id="modeText" style="color: #ff4444;">Aus</span>)<br>
+            <b>E</b> = Baumodus an/aus (<span id="buildText" style="color: #ff4444;">Aus</span>)<br>
+            <b>Linksklick</b> = Stein bauen (im Baumodus)<br>
+            <b>Rechtsklick</b> = Stein löschen (im Baumodus)<br>
+            <b>ESC</b> = Maus freigeben
+        </p>
+    </div>
+
+    <div id="crosshair"></div>
+
+    <!-- Three.js Bibliotheken -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/MTLLoader.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/OBJLoader.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/PointerLockControls.js"></script>
+
+    <script>
+        let scene, camera, renderer, controls;
+        let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false;
+        let moveUp = false, moveDown = false;
+        let canJump = false;
+        let prevTime = performance.now();
+        let velocity = new THREE.Vector3();
+        let direction = new THREE.Vector3();
+        let currentModel = null;
+        let raycaster = new THREE.Raycaster();
+
+        let flightMode = false;
+        let buildMode = false;
+        const PLAYER_HEIGHT = 8; 
+        const PLAYER_RADIUS = 3.5; 
+
+        let customBricks = [];
+        let previewBrick = null;
+
+        init();
+        animate();
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87ceeb);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 5000);
+            camera.position.set(0, 50, 50);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            renderer.toneMapping = THREE.ACESFilmicToneMapping;
+            renderer.toneMappingExposure = 1.1;
+            document.body.appendChild(renderer.domElement);
+
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+            scene.add(ambientLight);
+
+            const sunLight = new THREE.DirectionalLight(0xfffaed, 1.5);
+            sunLight.position.set(200, 250, 150);
+            sunLight.castShadow = true;
+            sunLight.shadow.mapSize.width = 2048;
+            sunLight.shadow.mapSize.height = 2048;
+            sunLight.shadow.camera.near = 0.5;
+            sunLight.shadow.camera.far = 1000;
+            const d = 300;
+            sunLight.shadow.camera.left = -d;
+            sunLight.shadow.camera.right = d;
+            sunLight.shadow.camera.top = d;
+            sunLight.shadow.camera.bottom = -d;
+            sunLight.shadow.bias = -0.0005;
+            scene.add(sunLight);
+
+            const fillLight = new THREE.DirectionalLight(0x99ccff, 0.6);
+            fillLight.position.set(-150, 100, -150);
+            scene.add(fillLight);
+
+            const gridHelper = new THREE.GridHelper(500, 100, 0x444444, 0x222222);
+            scene.add(gridHelper);
+
+            const previewGeo = new THREE.BoxGeometry(4, 3.2, 8);
+            const previewMat = new THREE.MeshBasicMaterial({ color: 0x00ff00, transparent: true, opacity: 0.5 });
+            previewBrick = new THREE.Mesh(previewGeo, previewMat);
+            previewBrick.visible = false;
+            scene.add(previewBrick);
+
+            controls = new THREE.PointerLockControls(camera, document.body);
+            
+            document.addEventListener('click', (event) => {
+                if (currentModel && !document.getElementById('info').contains(event.target)) {
+                    if (!controls.isLocked) {
+                        controls.lock();
+                    } else if (buildMode) {
+                        placeBrick();
+                    }
+                }
+            });
+
+            document.addEventListener('contextmenu', (event) => {
+                event.preventDefault();
+                if (buildMode && controls.isLocked) {
+                    deleteBrick();
+                }
+            });
+
+            const keyboardHandler = (isDown) => (event) => {
+                switch (event.code) {
+                    case 'KeyW': moveForward = isDown; break;
+                    case 'KeyS': moveBackward = isDown; break;
+                    case 'KeyA': moveLeft = isDown; break;
+                    case 'KeyD': moveRight = isDown; break;
+                    case 'ShiftLeft':
+                    case 'ShiftRight':
+                        moveDown = isDown;
+                        break;
+                    case 'Space':
+                        if (flightMode) {
+                            moveUp = isDown;
+                        } else {
+                            if (isDown && canJump === true) {
+                                let targetObjects = currentModel ? [currentModel, ...customBricks] : [...customBricks];
+                                if (targetObjects.length > 0) {
+                                    raycaster.set(camera.position, new THREE.Vector3(0, 1, 0));
+                                    const ceilingIntersects = raycaster.intersectObjects(targetObjects, true);
+                                    
+                                    if (ceilingIntersects.length > 0 && ceilingIntersects[0].distance < 6.0) {
+                                        break; 
+                                    }
+                                }
+
+                                velocity.y = 55;
+                                canJump = false;
+                            }
+                        }
+                        break;
+                    case 'KeyC':
+                        if (isDown && !buildMode) {
+                            flightMode = !flightMode;
+                            const modeText = document.getElementById('modeText');
+                            if (flightMode) {
+                                modeText.innerText = "An";
+                                modeText.style.color = "#00ff00";
+                                velocity.y = 0;
+                            } else {
+                                modeText.innerText = "Aus";
+                                modeText.style.color = "#ff4444";
+                            }
+                        }
+                        break;
+                    case 'KeyE':
+                        if (isDown) {
+                            buildMode = !buildMode;
+                            const buildText = document.getElementById('buildText');
+                            const crosshair = document.getElementById('crosshair');
+                            if (buildMode) {
+                                buildText.innerText = "An";
+                                buildText.style.color = "#00ff00";
+                                crosshair.style.display = 'block';
+                                previewBrick.visible = true;
+                            } else {
+                                buildText.innerText = "Aus";
+                                buildText.style.color = "#ff4444";
+                                crosshair.style.display = 'none';
+                                previewBrick.visible = false;
+                            }
+                        }
+                        break;
+                }
+            };
+            document.addEventListener('keydown', keyboardHandler(true));
+            document.addEventListener('keyup', keyboardHandler(false));
+
+            const scaleRange = document.getElementById('scaleRange');
+            const scaleValueText = document.getElementById('scaleValue');
+            scaleRange.addEventListener('input', (e) => {
+                const val = parseFloat(e.target.value);
+                scaleValueText.innerText = val;
+                if (currentModel) currentModel.scale.set(val, val, val);
+            });
+
+            const posXRanger = document.getElementById('posXRanger');
+            const posYRanger = document.getElementById('posYRanger');
+            const posZRanger = document.getElementById('posZRanger');
+
+            posXRanger.addEventListener('input', (e) => {
+                document.getElementById('posXValue').innerText = e.target.value;
+                if (currentModel) currentModel.position.x = parseFloat(e.target.value);
+            });
+            posYRanger.addEventListener('input', (e) => {
+                document.getElementById('posYValue').innerText = e.target.value;
+                if (currentModel) currentModel.position.y = parseFloat(e.target.value);
+            });
+            posZRanger.addEventListener('input', (e) => {
+                document.getElementById('posZValue').innerText = e.target.value;
+                if (currentModel) currentModel.position.z = parseFloat(e.target.value);
+            });
+
+            document.getElementById('fileInput').addEventListener('change', handleFiles);
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        // --- GLÄNZENDES HOCHGLANZ-PLASTIK-MATERIAL ---
+        function createVoyagerMaterial(colorHex) {
+            return new THREE.MeshPhysicalMaterial({
+                color: colorHex,
+                roughness: 0.1,
+                metalness: 0.05,
+                clearcoat: 1.0,
+                clearcoatRoughness: 0.05
+            });
+        }
+
+        function placeBrick() {
+            if (!previewBrick.visible) return;
+            
+            const colorVal = parseInt(document.getElementById('brickColor').value);
+            const brickGeo = new THREE.BoxGeometry(4, 3.2, 8);
+            const brickMat = createVoyagerMaterial(colorVal);
+            const newBrick = new THREE.Mesh(brickGeo, brickMat);
+            
+            newBrick.castShadow = true;
+            newBrick.receiveShadow = true;
+            newBrick.position.copy(previewBrick.position);
+            scene.add(newBrick);
+            customBricks.push(newBrick);
+        }
+
+        function deleteBrick() {
+            raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+            const intersects = raycaster.intersectObjects(customBricks);
+            if (intersects.length > 0) {
+                const hitBrick = intersects[0].object;
+                scene.remove(hitBrick);
+                customBricks = customBricks.filter(b => b !== hitBrick);
+            }
+        }
+
+        function handleFiles(e) {
+            const files = e.target.files;
+            let objFile = null;
+            let mtlFile = null;
+
+            for (let i = 0; i < files.length; i++) {
+                const name = files[i].name.toLowerCase();
+                if (name.endsWith('.obj')) objFile = files[i];
+                if (name.endsWith('.mtl')) mtlFile = files[i];
+            }
+
+            if (!objFile) {
+                alert('Bitte mindestens eine .obj Datei auswählen!');
+                return;
+            }
+
+            if (currentModel) scene.remove(currentModel);
+
+            function finalizeModel(object) {
+                currentModel = object;
+
+                currentModel.traverse((child) => {
+                    if (child.isMesh) {
+                        child.castShadow = true;
+                        child.receiveShadow = true;
+                        if (child.material) {
+                            child.material.roughness = 0.1;
+                            child.material.metalness = 0.05;
+                            child.material.clearcoat = 1.0;
+                            child.material.clearcoatRoughness = 0.05;
+                        } else {
+                            child.material = createVoyagerMaterial(0xcccccc);
+                        }
+                    }
+                });
+
+                const box = new THREE.Box3().setFromObject(currentModel);
+                const minY = box.min.y;
+                currentModel.traverse((child) => {
+                    if (child.isMesh && child.geometry) {
+                        child.geometry.translate(0, -minY, 0);
+                    }
+                });
+
+                const initialScale = parseFloat(document.getElementById('scaleRange').value);
+                currentModel.scale.set(initialScale, initialScale, initialScale);
+                currentModel.position.set(
+                    parseFloat(document.getElementById('posXRanger').value),
+                    parseFloat(document.getElementById('posYRanger').value),
+                    parseFloat(document.getElementById('posZRanger').value)
+                );
+
+                scene.add(currentModel);
+                document.getElementById('status').innerHTML = "<b style='color:#00ff00;'>Modell geladen! Klicke ins Bild.</b>";
+            }
+
+            if (mtlFile) {
+                const mtlReader = new FileReader();
+                mtlReader.onload = function(mtlEvent) {
+                    const mtlText = mtlEvent.target.result;
+                    const mtlBlob = new Blob([mtlText], { type: 'text/plain' });
+                    const mtlUrl = URL.createObjectURL(mtlBlob);
+
+                    const mtlLoader = new THREE.MTLLoader();
+                    mtlLoader.load(mtlUrl, function(materials) {
+                        materials.preload();
+
+                        const objReader = new FileReader();
+                        objReader.onload = function(objEvent) {
+                            const objText = objEvent.target.result;
+                            const objLoader = new THREE.OBJLoader();
+                            objLoader.setMaterials(materials);
+                            const object = objLoader.parse(objText);
+                            finalizeModel(object);
+                        };
+                        objReader.readAsText(objFile);
+                    });
+                };
+                mtlReader.readAsText(mtlFile);
+            } else {
+                const objReader = new FileReader();
+                objReader.onload = function(objEvent) {
+                    const objText = objEvent.target.result;
+                    const objLoader = new THREE.OBJLoader();
+                    const object = objLoader.parse(objText);
+                    finalizeModel(object);
+                };
+                objReader.readAsText(objFile);
+            }
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const time = performance.now();
+            if (controls.isLocked === true) {
+                const delta = (time - prevTime) / 1000;
+
+                if (flightMode) {
+                    const flySpeed = 50.0 * delta;
+                    const vDir = new THREE.Vector3();
+                    camera.getWorldDirection(vDir);
+
+                    const sideDir = new THREE.Vector3();
+                    sideDir.crossVectors(camera.up, vDir).normalize();
+
+                    if (moveForward) camera.position.addScaledVector(vDir, flySpeed * 2);
+                    if (moveBackward) camera.position.addScaledVector(vDir, -flySpeed * 2);
+                    if (moveRight) camera.position.addScaledVector(sideDir, -flySpeed * 2);
+                    if (moveLeft) camera.position.addScaledVector(sideDir, flySpeed * 2);
+                    if (moveUp) camera.position.y += flySpeed * 2;
+                    if (moveDown) camera.position.y -= flySpeed * 2;
+
+                } else {
+                    velocity.x -= velocity.x * 10.0 * delta;
+                    velocity.z -= velocity.z * 10.0 * delta;
+                    velocity.y -= 9.8 * 25.0 * delta; 
+
+                    direction.z = Number(moveForward) - Number(moveBackward);
+                    direction.x = Number(moveRight) - Number(moveLeft);
+                    direction.normalize();
+
+                    if (moveForward || moveBackward) velocity.z -= direction.z * 300.0 * delta;
+                    if (moveLeft || moveRight) velocity.x -= direction.x * 300.0 * delta;
+
+                    let targetObjects = currentModel ? [currentModel, ...customBricks] : [...customBricks];
+
+                    // 360-Grad Zylinder-Kollision
+                    if (targetObjects.length > 0) {
+                        const forward = new THREE.Vector3();
+                        camera.getWorldDirection(forward);
+                        forward.y = 0;
+                        forward.normalize();
+
+                        const right = new THREE.Vector3();
+                        right.crossVectors(camera.up, forward).normalize();
+
+                        const moveDelta = new THREE.Vector3();
+                        moveDelta.addScaledVector(forward, -velocity.z * delta);
+                        moveDelta.addScaledVector(right, -velocity.x * delta);
+
+                        if (moveDelta.lengthSq() > 0.00001) {
+                            const moveDist = moveDelta.length();
+                            const checkDir = moveDelta.clone().normalize();
+                            
+                            const rayOrigin = camera.position.clone();
+                            rayOrigin.y -= 2; 
+                            
+                            let hitWall = false;
+                            const rayCount = 8;
+                            for (let i = 0; i < rayCount; i++) {
+                                const angle = (i / rayCount) * Math.PI * 2;
+                                let dirCopy = checkDir.clone();
+                                dirCopy.applyAxisAngle(new THREE.Vector3(0, 1, 0), angle * 0.5);
+                                raycaster.set(rayOrigin, dirCopy);
+                                const wallIntersects = raycaster.intersectObjects(targetObjects, true);
+
+                                if (wallIntersects.length > 0 && wallIntersects[0].distance < moveDist + PLAYER_RADIUS) {
+                                    hitWall = true;
+                                    break;
+                                }
+                            }
+
+                            if (hitWall) {
+                                velocity.x = 0;
+                                velocity.z = 0;
+                            }
+                        }
+                    }
+
+                    controls.moveRight(-velocity.x * delta);
+                    controls.moveForward(-velocity.z * delta);
+
+                    camera.position.y += (velocity.y * delta);
+
+                    // Decken-Kollision
+                    if (velocity.y > 0 && targetObjects.length > 0) {
+                        raycaster.set(camera.position, new THREE.Vector3(0, 1, 0));
+                        const ceilingIntersects = raycaster.intersectObjects(targetObjects, true);
+                        if (ceilingIntersects.length > 0 && ceilingIntersects[0].distance < 3.0) {
+                            velocity.y = 0; 
+                        }
+                    }
+
+                    // Boden-Kollision
+                    canJump = false;
+                    if (targetObjects.length > 0) {
+                        raycaster.set(camera.position, new THREE.Vector3(0, -1, 0));
+                        const intersects = raycaster.intersectObjects(targetObjects, true);
+
+                        if (intersects.length > 0) {
+                            const hit = intersects[0];
+                            const targetY = hit.point.y + PLAYER_HEIGHT;
+                            
+                            if (camera.position.y <= targetY && camera.position.y >= targetY - 3.5) {
+                                camera.position.y = targetY;
+                                velocity.y = 0;
+                                canJump = true;
+                            }
+                        }
+                    }
+
+                    if (camera.position.y < PLAYER_HEIGHT) {
+                        camera.position.y = PLAYER_HEIGHT;
+                        velocity.y = 0;
+                        canJump = true;
+                    }
+                }
+
+                // Vorschau-Stein im Baumodus
+                if (buildMode && currentModel) {
+                    raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+                    const allTargets = [currentModel, ...customBricks];
+                    const intersects = raycaster.intersectObjects(allTargets, true);
+
+                    if (intersects.length > 0) {
+                        const hit = intersects[0];
+                        const pos = hit.point.clone().add(hit.face.normal.clone().multiplyScalar(1.6));
+                        
+                        pos.x = Math.round(pos.x / 4) * 4;
+                        pos.y = Math.round(pos.y / 3.2) * 3.2 + 1.6;
+                        pos.z = Math.round(pos.z / 4) * 4;
+
+                        previewBrick.position.copy(pos);
+                        previewBrick.visible = true;
+                    } else {
+                        previewBrick.visible = false;
+                    }
+                }
+            }
+
+            prevTime = time;
+            renderer.render(scene, camera);
+        }
+    </script>
+</body>
+</html>
